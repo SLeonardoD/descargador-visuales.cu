@@ -43,10 +43,32 @@ jobs:
           fi
 
   # ------------------------------------------------------------------
-  # 2) Compila el binario en cada sistema operativo
+  # 2) Corre los tests unitarios. Si algo se rompe, ni se intenta compilar
+  #    ni publicar un release roto.
+  # ------------------------------------------------------------------
+  test:
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias (incluye pytest)
+        run: pip install -r requirements-dev.txt
+
+      - name: Correr tests unitarios
+        run: pytest tests/ -v
+
+  # ------------------------------------------------------------------
+  # 3) Compila el binario en cada sistema operativo
   # ------------------------------------------------------------------
   build:
-    needs: check-version
+    needs: [check-version, test]
     strategy:
       fail-fast: false
       matrix:
@@ -73,8 +95,35 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt pyinstaller
 
+      # UPX comprime el binario final. Se omite en macOS a propósito: los
+      # binarios comprimidos con UPX suelen chocar con Gatekeeper/notarización.
+      - name: Instalar UPX (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y upx-ucl
+
+      - name: Instalar UPX (Windows)
+        if: runner.os == 'Windows'
+        run: choco install upx -y
+
       - name: Compilar ejecutable con PyInstaller
-        run: pyinstaller --onefile --name descargador-repositorio descargador_repositorio.py
+        run: >
+          pyinstaller --onefile --name descargador-repositorio
+          --exclude-module tkinter
+          --exclude-module unittest
+          --exclude-module pdb
+          --exclude-module doctest
+          --exclude-module matplotlib
+          --exclude-module numpy
+          --exclude-module pandas
+          --exclude-module scipy
+          --exclude-module IPython
+          --exclude-module notebook
+          --exclude-module pytest
+          descargador_repositorio.py
+
+      - name: Mostrar tamaño del binario compilado
+        shell: bash
+        run: ls -lh dist/ || dir dist
 
       - name: Renombrar artefacto (Windows)
         if: runner.os == 'Windows'
@@ -126,7 +175,7 @@ jobs:
   # 3) Junta todos los binarios y publica el Release en GitHub
   # ------------------------------------------------------------------
   release:
-    needs: [check-version, build]
+    needs: [check-version, test, build]
     runs-on: ubuntu-latest
     steps:
       - name: Descargar todos los artefactos compilados
