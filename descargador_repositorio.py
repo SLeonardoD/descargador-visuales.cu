@@ -40,8 +40,9 @@ PROXY (opcional, requiere --use-proxy)
 El proxy está DESACTIVADO por defecto. Solo se usa si pasas --use-proxy.
 
 Cuando usas --use-proxy, la herramienta busca un archivo .csv con los datos
-del proxy (por defecto "proxy.csv" en el directorio actual; puedes indicar
-otro con --proxy-file):
+del proxy (por defecto "proxy.csv" junto al ejecutable/script, es decir en
+la misma carpeta donde está el .exe o el .py; puedes indicar otra ruta con
+--proxy-file):
 
   - Si el archivo NO existe: se genera automáticamente una plantilla de
     ejemplo en esa ruta y el programa se detiene, para que la completes
@@ -71,7 +72,7 @@ EJEMPLOS
     # Guardar en una carpeta específica y con 5 descargas a la vez
     descargador_repositorio -o "/mnt/d/Videos" --workers 5 "https://sitio/Peliculas/"
 
-    # Descargar a través de un proxy (usa/crea proxy.csv en el directorio actual)
+    # Descargar a través de un proxy (usa/crea proxy.csv junto al ejecutable)
     descargador_repositorio --use-proxy "https://sitio/Peliculas/"
 
     # Descargar a través de un proxy definido en un csv con otro nombre
@@ -102,6 +103,17 @@ PROXY_CSV_EJEMPLO = ["10.0.0.5", "8080", "miusuario", "miclave", "http"]
 HREF_RE = re.compile(r'<a\s+[^>]*href="([^"]+)"', re.IGNORECASE)
 
 SESSION = requests.Session()
+
+
+def directorio_base():
+    """Carpeta donde vive el ejecutable/script, usada para ubicar archivos
+    "junto a la herramienta" (como proxy.csv) sin importar desde qué
+    directorio de trabajo se invoque el comando.
+    Funciona tanto corriendo el .py normal como compilado con PyInstaller
+    (donde sys.frozen=True y sys.executable apunta al binario)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 class ProxyIncorrectoError(Exception):
@@ -312,8 +324,8 @@ def main():
     ap.add_argument("--user-agent", default="Mozilla/5.0 (compatible; DescargadorRepositorio/1.0)")
     ap.add_argument("--no-resume", action="store_true", help="Vuelve a descargar todo aunque el archivo ya exista.")
     ap.add_argument("--use-proxy", action="store_true", help="Activa el uso de proxy (desactivado por defecto).")
-    ap.add_argument("--proxy-file", default=PROXY_FILE_POR_DEFECTO,
-                     help=f"Archivo .csv con los datos del proxy (por defecto: '{PROXY_FILE_POR_DEFECTO}'). Solo aplica junto con --use-proxy.")
+    ap.add_argument("--proxy-file", default=None,
+                     help=f"Archivo .csv con los datos del proxy (por defecto: '{PROXY_FILE_POR_DEFECTO}' junto al ejecutable). Solo aplica junto con --use-proxy.")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     ap.add_argument("url", help="URL de la carpeta raíz a descargar (serie, temporada o película). Va al final, después de las opciones.")
     args = ap.parse_args()
@@ -322,8 +334,9 @@ def main():
         ap.error("--workers debe ser 1 o mayor.")
 
     if args.use_proxy:
+        ruta_proxy = args.proxy_file or os.path.join(directorio_base(), PROXY_FILE_POR_DEFECTO)
         try:
-            proxies = resolver_proxy(args.proxy_file)
+            proxies = resolver_proxy(ruta_proxy)
         except ProxyPlantillaGeneradaError as e:
             log(str(e))
             sys.exit(1)

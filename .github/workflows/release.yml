@@ -1,0 +1,149 @@
+name: Release
+
+# Se dispara cada vez que hay un push directo a master (por ejemplo, al
+# mergear un Pull Request). Si prefieres controlar manualmente cuándo se
+# publica un release, puedes cambiar esto por: on: workflow_dispatch
+on:
+  push:
+    branches: [master]
+
+# Necesario para que el job "release" pueda crear el Release y subir archivos
+permissions:
+  contents: write
+
+env:
+  APP_NAME: descargador-repositorio
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1) Lee la versión desde el archivo VERSION y valida que no exista ya
+  #    como release. Si alguien olvidó bumpear la versión, esto falla
+  #    rápido (antes de gastar minutos compilando en 3 sistemas operativos).
+  # ------------------------------------------------------------------
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.leer.outputs.version }}
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Leer versión del archivo VERSION
+        id: leer
+        run: |
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          echo "Versión detectada: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verificar que esa versión no tenga ya un release
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/v${{ steps.leer.outputs.version }}$"; then
+            echo "::error::Ya existe un release para la versión v${{ steps.leer.outputs.version }}. Edita el archivo VERSION (súbela, ej. de 0.1.0 a 0.1.1) antes de hacer push a master."
+            exit 1
+          fi
+
+  # ------------------------------------------------------------------
+  # 2) Compila el binario en cada sistema operativo
+  # ------------------------------------------------------------------
+  build:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset_name: descargador-repositorio-windows.exe
+            built_path: dist/descargador-repositorio.exe
+          - os: macos-latest
+            asset_name: descargador-repositorio-macos
+            built_path: dist/descargador-repositorio
+          - os: ubuntu-latest
+            asset_name: descargador-repositorio-linux
+            built_path: dist/descargador-repositorio
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Compilar ejecutable con PyInstaller
+        run: pyinstaller --onefile --name descargador-repositorio descargador_repositorio.py
+
+      - name: Renombrar artefacto (Windows)
+        if: runner.os == 'Windows'
+        run: copy ${{ matrix.built_path }} ${{ matrix.asset_name }}
+
+      - name: Renombrar artefacto (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: cp ${{ matrix.built_path }} ${{ matrix.asset_name }}
+
+      # --- Empaquetado extra .deb / .rpm, solo en Linux ---
+      - name: Instalar fpm (empaquetador .deb/.rpm)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rpm build-essential
+          sudo gem install --no-document fpm
+
+      - name: Construir paquete .deb
+        if: runner.os == 'Linux'
+        run: |
+          fpm -s dir -t deb \
+              -n "$APP_NAME" \
+              -v "${{ needs.check-version.outputs.version }}" \
+              --prefix /usr/local/bin \
+              --force \
+              dist/descargador-repositorio=descargador-repositorio
+
+      - name: Construir paquete .rpm
+        if: runner.os == 'Linux'
+        run: |
+          fpm -s dir -t rpm \
+              -n "$APP_NAME" \
+              -v "${{ needs.check-version.outputs.version }}" \
+              --prefix /usr/local/bin \
+              --force \
+              dist/descargador-repositorio=descargador-repositorio
+
+      - name: Subir artefactos de este job
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.os }}
+          path: |
+            ${{ matrix.asset_name }}
+            *.deb
+            *.rpm
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------
+  # 3) Junta todos los binarios y publica el Release en GitHub
+  # ------------------------------------------------------------------
+  release:
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar todos los artefactos compilados
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Aplanar carpeta de artefactos
+        run: |
+          mkdir -p release_files
+          find artifacts -type f -exec cp {} release_files/ \;
+          ls -la release_files
+
+      - name: Crear Release en GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: "Versión ${{ needs.check-version.outputs.version }}"
+          generate_release_notes: true
+          files: release_files/*
