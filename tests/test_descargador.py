@@ -1,7 +1,7 @@
 """
-Tests unitarios de descargador_repositorio.py.
+Tests unitarios de descargador_repositorio.py y dr_lib/.
 No requieren red: prueban únicamente las funciones puras (parseo de HTML,
-parseo de tamaños, normalización de nombres, parseo del csv de proxy).
+parseo de tamaños, normalización de nombres, y config-file.json).
 
 Correr con: pytest tests/
 """
@@ -122,68 +122,165 @@ def test_parsear_listado_ignora_enlaces_fuera_de_la_carpeta():
 
 
 # ---------------------------------------------------------------------------
-# Proxy: generar plantilla y leerla
+# config-file.json: generación de plantilla, validación, y fusión de precedencia
 # ---------------------------------------------------------------------------
-def test_generar_y_leer_proxy_valido(tmp_path):
-    ruta = tmp_path / "proxy.csv"
-    dr.generar_proxy_plantilla(str(ruta))
-    proxies = dr.leer_proxy_csv(str(ruta))
-    assert proxies["http"].startswith("http://miusuario:miclave@10.0.0.5:8080")
+import json  # noqa: E402
+from dr_lib import config as cfgmod  # noqa: E402
+
+
+def test_generar_config_ejemplo_incluye_todos_los_campos(tmp_path):
+    ruta = tmp_path / "example.config-file.json"
+    cfgmod.generar_config_ejemplo(str(ruta))
+    data = json.loads(ruta.read_text(encoding="utf-8"))
+    for campo in cfgmod.DEFAULTS:
+        assert campo in data, f"falta el campo '{campo}' en el ejemplo generado"
+    assert "proxy" in data
+    assert "_ayuda" in data and "_info" in data
+
+
+def test_leer_config_json_valido(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"workers": 4, "quiet": True, "url": "https://x/y/"}))
+    data, proxies, advertencias = cfgmod.leer_config_json(str(ruta))
+    assert data["workers"] == 4
+    assert data["quiet"] is True
+    assert proxies is None
+    assert advertencias == []
+
+
+def test_leer_config_json_con_proxy_valido(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"proxy": {"host": "10.0.0.5", "puerto": 8080, "usuario": "u", "contrasena": "p"}}))
+    _, proxies, _ = cfgmod.leer_config_json(str(ruta))
+    assert proxies["http"] == "http://u:p@10.0.0.5:8080"
     assert proxies["http"] == proxies["https"]
 
 
-def test_proxy_sin_usuario_ni_contrasena(tmp_path):
-    ruta = tmp_path / "proxy.csv"
-    ruta.write_text("host,puerto\n192.168.1.10,3128\n")
-    proxies = dr.leer_proxy_csv(str(ruta))
-    assert proxies["http"] == "http://192.168.1.10:3128"
+def test_leer_config_json_proxy_sin_credenciales(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"proxy": {"host": "10.0.0.5", "puerto": 3128}}))
+    _, proxies, _ = cfgmod.leer_config_json(str(ruta))
+    assert proxies["http"] == "http://10.0.0.5:3128"
 
 
-def test_proxy_con_caracteres_especiales_en_contrasena(tmp_path):
-    ruta = tmp_path / "proxy.csv"
-    ruta.write_text("host,puerto,usuario,contrasena\n10.0.0.5,8080,user,mi:clave@rara\n")
-    proxies = dr.leer_proxy_csv(str(ruta))
-    assert "mi%3Aclave%40rara" in proxies["http"]
+def test_leer_config_json_detecta_clave_desconocida(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"workres": 3}))  # typo intencional
+    _, _, advertencias = cfgmod.leer_config_json(str(ruta))
+    assert "workres" in advertencias
 
 
-def test_proxy_puerto_invalido_lanza_error(tmp_path):
-    ruta = tmp_path / "proxy.csv"
-    ruta.write_text("host,puerto\n10.0.0.5,no-es-un-puerto\n")
+def test_leer_config_json_ignora_claves_con_guion_bajo(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"_info": "nota", "_ayuda": {}, "workers": 3}))
+    data, _, advertencias = cfgmod.leer_config_json(str(ruta))
+    assert advertencias == []
+    assert data["workers"] == 3
+
+
+def test_leer_config_json_tipo_invalido_lanza_error(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"workers": "muchos"}))
     try:
-        dr.leer_proxy_csv(str(ruta))
-        assert False, "Debería haber lanzado ProxyIncorrectoError"
-    except dr.ProxyIncorrectoError:
+        cfgmod.leer_config_json(str(ruta))
+        assert False, "Debería haber lanzado ConfigIncorrectoError"
+    except cfgmod.ConfigIncorrectoError:
         pass
 
 
-def test_proxy_esquema_invalido_lanza_error(tmp_path):
-    ruta = tmp_path / "proxy.csv"
-    ruta.write_text("host,puerto,usuario,contrasena,esquema\n10.0.0.5,8080,,,ftp\n")
+def test_leer_config_json_workers_menor_a_uno_lanza_error(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"workers": 0}))
     try:
-        dr.leer_proxy_csv(str(ruta))
-        assert False, "Debería haber lanzado ProxyIncorrectoError"
-    except dr.ProxyIncorrectoError:
+        cfgmod.leer_config_json(str(ruta))
+        assert False, "Debería haber lanzado ConfigIncorrectoError"
+    except cfgmod.ConfigIncorrectoError:
         pass
 
 
-def test_proxy_sin_filas_de_datos_lanza_error(tmp_path):
-    ruta = tmp_path / "proxy.csv"
-    ruta.write_text("host,puerto,usuario,contrasena\n")
+def test_leer_config_json_proxy_puerto_invalido_lanza_error(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"proxy": {"host": "10.0.0.5", "puerto": 999999}}))
     try:
-        dr.leer_proxy_csv(str(ruta))
-        assert False, "Debería haber lanzado ProxyIncorrectoError"
-    except dr.ProxyIncorrectoError:
+        cfgmod.leer_config_json(str(ruta))
+        assert False, "Debería haber lanzado ConfigIncorrectoError"
+    except cfgmod.ConfigIncorrectoError:
         pass
 
 
-def test_resolver_proxy_genera_plantilla_si_no_existe(tmp_path):
-    ruta = tmp_path / "no_existe_todavia.csv"
+def test_leer_config_json_proxy_esquema_invalido_lanza_error(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps({"proxy": {"host": "10.0.0.5", "puerto": 8080, "esquema": "ftp"}}))
     try:
-        dr.resolver_proxy(str(ruta))
-        assert False, "Debería haber lanzado ProxyPlantillaGeneradaError"
-    except dr.ProxyPlantillaGeneradaError:
+        cfgmod.leer_config_json(str(ruta))
+        assert False, "Debería haber lanzado ConfigIncorrectoError"
+    except cfgmod.ConfigIncorrectoError:
+        pass
+
+
+def test_leer_config_json_no_es_json_lanza_error(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text("esto no es json {{{")
+    try:
+        cfgmod.leer_config_json(str(ruta))
+        assert False, "Debería haber lanzado ConfigIncorrectoError"
+    except cfgmod.ConfigIncorrectoError:
+        pass
+
+
+def test_leer_config_json_raiz_no_es_objeto_lanza_error(tmp_path):
+    ruta = tmp_path / "config-file.json"
+    ruta.write_text(json.dumps([1, 2, 3]))
+    try:
+        cfgmod.leer_config_json(str(ruta))
+        assert False, "Debería haber lanzado ConfigIncorrectoError"
+    except cfgmod.ConfigIncorrectoError:
+        pass
+
+
+def test_resolver_config_genera_plantilla_si_no_existe(tmp_path):
+    ruta = tmp_path / "no_existe_todavia.json"
+    try:
+        cfgmod.resolver_config(str(ruta))
+        assert False, "Debería haber lanzado ConfigPlantillaGeneradaError"
+    except cfgmod.ConfigPlantillaGeneradaError:
         pass
     assert ruta.exists()
+    # la plantilla generada debe ser, a su vez, un config válido
+    data = json.loads(ruta.read_text(encoding="utf-8"))
+    for campo in cfgmod.DEFAULTS:
+        assert campo in data
+
+
+# --- Fusión de precedencia: CLI explícito > config-file > default real ---
+def test_fusion_cli_gana_sobre_config():
+    config_data = {"workers": 5, "retries": 7}
+
+    def resolver(campo, cli_valor):
+        if cli_valor is not None:
+            return cli_valor
+        if campo in config_data:
+            return config_data[campo]
+        return cfgmod.DEFAULTS[campo]
+
+    assert resolver("workers", 9) == 9  # el CLI (9) le gana al config (5)
+    assert resolver("retries", None) == 7  # nadie en CLI -> usa el config
+    assert resolver("max_depth", None) == cfgmod.DEFAULTS["max_depth"]  # ni CLI ni config -> default
+
+
+def test_fusion_booleanos_distinguen_no_pasado_de_false():
+    # con BooleanOptionalAction, None = "no se pasó", True/False = explícito
+    config_data = {"quiet": True}
+
+    def resolver(campo, cli_valor):
+        if cli_valor is not None:
+            return cli_valor
+        if campo in config_data:
+            return config_data[campo]
+        return cfgmod.DEFAULTS[campo]
+
+    assert resolver("quiet", None) is True  # lo toma del config
+    assert resolver("quiet", False) is False  # --no-quiet explícito le gana al config
 
 
 # ---------------------------------------------------------------------------

@@ -1,2 +1,3 @@
 requests>=2.31
 tqdm>=4.66
+colorama>=0.4.6

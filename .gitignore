@@ -1,5 +1,6 @@
 # Datos sensibles / generados en tiempo de ejecución — nunca deben subirse
-proxy.csv
+config-file.json
+example.config-file.json
 *.part
 
 # Artefactos de compilación de PyInstaller
